@@ -1,0 +1,355 @@
+import {
+	App,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	SuggestModal,
+} from "obsidian";
+import { Project, Task, Timer, User } from "types";
+// Remember to rename these classes and interfaces!
+
+interface EverhourPluginSettings {
+	apiKey: string;
+	reminder: REMINDER_DAYS[];
+}
+
+const DEFAULT_SETTINGS: EverhourPluginSettings = {
+	reminder: [],
+	apiKey: "",
+};
+
+enum REMINDER_DAYS {
+	"Monday",
+	"Tuesday",
+	"Wednesday",
+	"Thursday",
+	"Friday",
+	"Saturday",
+	"Sunday",
+}
+
+export default class EverhourPlugin extends Plugin {
+	settings: EverhourPluginSettings;
+	user: User;
+
+	activeTimer?: Timer | undefined;
+
+	durationInterval?: number;
+
+	async onload() {
+		await this.loadSettings();
+
+		// This creates an icon in the left ribbon.
+		const ribbonIconEl = this.addRibbonIcon(
+			"clock",
+			"Sample Plugin",
+			(evt: MouseEvent) => {
+				// Called when the user clicks the icon.
+			},
+		);
+		// Perform additional things with the ribbon
+		ribbonIconEl.addClass("my-plugin-ribbon-class");
+		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
+		const statusBarItemEl = this.addStatusBarItem();
+
+		this.user = await getUser(this.settings.apiKey);
+		this.activeTimer = await getRunningTimer(
+			this.user.id,
+			this.user.name,
+			this.settings.apiKey,
+		);
+
+		if (this.activeTimer.status == "active") {
+			this.startDurationTracking(statusBarItemEl);
+		} else {
+			statusBarItemEl.setText(`Not tracking time currently`);
+		}
+		const userTasks: Task[] = await getUserTasks(
+			this.user.id,
+			this.settings.apiKey,
+		);
+
+		const projects = await getProjects("Neuron", this.settings.apiKey, {});
+		console.log(projects);
+
+		// This adds an editor command that can perform some operation on the current editor instance
+		this.addCommand({
+			id: "everhour-start-tracking",
+			name: "Start Time Tracking",
+			callback: () => {
+				new StartTimerModal(
+					this.app,
+					this.settings.apiKey,
+					async (value) => {
+						this.activeTimer = await startTimer(
+							value.id,
+							this.settings.apiKey,
+						);
+
+						if (this.activeTimer?.status == "active") {
+							this.startDurationTracking(statusBarItemEl);
+						}
+					},
+					userTasks,
+					new Map(projects.map((project) => [project.id, project])),
+				).open();
+			},
+		});
+		this.addCommand({
+			id: "everhour-stop-tracking",
+			name: "Stop running timer",
+			callback: () => {
+				stopCurrentRunning(this.settings.apiKey).then(() => {
+					statusBarItemEl.setText("No active timers");
+					this.stopDurationInterval();
+				});
+			},
+		});
+		// This adds a settings tab so the user can configure various aspects of the plugin
+		this.addSettingTab(new SampleSettingTab(this.app, this));
+
+		this.registerInterval(
+			// Check status of tracking once every minute to make it sync with server
+			window.setInterval(async () => {
+				const { id, name } = this.user;
+				this.activeTimer = await getRunningTimer(
+					id,
+					name,
+					this.settings.apiKey,
+				);
+				if (this.activeTimer?.status == "active") {
+					this.startDurationTracking(statusBarItemEl);
+				} else {
+					this.activeTimer = undefined;
+					this.stopDurationInterval();
+					statusBarItemEl.setText("No active timers");
+				}
+			}, 60 * 1000),
+		);
+	}
+
+	onunload() {
+		if (this.durationInterval) {
+			window.clearInterval(this.durationInterval);
+		}
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData(),
+		);
+	}
+
+	startDurationTracking(statusBarItemEl: HTMLElement) {
+		this.stopDurationInterval();
+		this.durationInterval = window.setInterval(() => {
+			if (this.activeTimer?.status != "active") return;
+			statusBarItemEl.setText(
+				`${this.activeTimer.task.name}: ${duration(
+					this.activeTimer.duration++,
+				)}`,
+			);
+		}, 1000);
+	}
+
+	stopDurationInterval() {
+		if (this.durationInterval) {
+			window.clearInterval(this.durationInterval);
+		}
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+}
+
+function duration(time: number) {
+	const date = new Date(0);
+	date.setSeconds(time);
+	return date.toISOString().substring(11, 19);
+}
+
+async function getUser(apikey: string): Promise<User> {
+	const res = await requestApi("/users/me", apikey);
+	return res;
+}
+
+async function getUserTasks(userId: number, apikey: string) {
+	const res = await requestApi(`/users/${userId}/time`, apikey, {
+		limit: 20,
+	});
+	return res.map((e: any) => e.task);
+}
+
+async function getTasks(query: string, apikey: string): Promise<Task[]> {
+	const res = await requestApi("/tasks/search", apikey, {
+		query,
+		limit: 30,
+		searchInClosed: false,
+	});
+	return res;
+}
+
+async function getRunningTimer(
+	id: number,
+	name: string,
+	apikey: string,
+): Promise<Timer> {
+	const res: Timer = await requestApi("/timers/current", apikey, {
+		status: "active",
+		user: { id, name },
+	});
+	return res;
+}
+
+async function startTimer(taskId: string, apiKey: string) {
+	const res: Timer = await requestApi(
+		"/timers",
+		apiKey,
+		{
+			task: taskId,
+		},
+		"POST",
+	);
+	return res;
+}
+
+async function stopCurrentRunning(apikey: string) {
+	const res: Timer = await requestApi(
+		"/timers/current",
+		apikey,
+		{},
+		"DELETE",
+	);
+	return res;
+}
+
+async function getProjects(
+	query = "",
+	apiKey: string,
+	{ limit = 0 },
+): Promise<Project[]> {
+	return requestApi("/projects", apiKey, { query, limit });
+}
+
+// async function getProject(projectId: string, apiKey: string): Promise<Project> {
+// 	return requestApi(`/projects/${projectId}`, apiKey, {});
+// }
+
+async function requestApi<T extends `/${string}`>(
+	url: T,
+	apikey: string,
+	params: object = {},
+	method: "GET" | "DELETE" | "POST" = "GET",
+) {
+	const headers = new Headers({
+		"X-Api-Key": apikey,
+		"Content-Type": "application/json",
+	});
+	const uri = new URL(url, "https://api.everhour.com");
+	if (method == "GET") {
+		for (const [key, value] of Object.entries(params)) {
+			uri.searchParams.append(key, value);
+		}
+	}
+	const response = await fetch(uri.toString(), {
+		headers,
+		method,
+		body: method !== "GET" ? JSON.stringify(params) : undefined,
+	});
+	return await response.json();
+}
+
+class StartTimerModal extends SuggestModal<Task> {
+	timeout = 0;
+	apiKey = "";
+
+	selection: Task;
+
+	userTasks: Task[];
+
+	onSelect: (selection: Task) => Task;
+
+	projects: Map<string, Project> = new Map();
+
+	constructor(
+		app: App,
+		apikey: string,
+		onSelect: (selection: Task) => any,
+		userTasks: Task[],
+		projects: Map<string, Project>,
+	) {
+		super(app);
+		this.apiKey = apikey;
+		this.userTasks = userTasks;
+		this.onSelect = onSelect;
+		this.projects = projects;
+	}
+
+	getSuggestions(query = ""): Promise<Task[]> | Task[] {
+		if (!query) return this.userTasks;
+		return getTasks(query, this.apiKey);
+	}
+
+	onChooseSuggestion(value: Task, evt: MouseEvent | KeyboardEvent): void {
+		this.onSelect(value);
+	}
+
+	async renderSuggestion(value: Task, el: HTMLElement): Promise<void> {
+		const projectId = value.projects[0];
+		const projectName = this.projects.get(projectId)?.name;
+
+		el.createEl("div", { text: value.name });
+		el.createEl("small", { text: projectName });
+	}
+}
+
+class SampleSettingTab extends PluginSettingTab {
+	plugin: EverhourPlugin;
+
+	constructor(app: App, plugin: EverhourPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		const desc = document.createDocumentFragment();
+		desc.append(
+			"Apikey from ",
+			desc.createEl("a", {
+				href: "https://app.everhour.com/#/account/profile",
+				text: "User settings",
+			}),
+			" page",
+		);
+		new Setting(containerEl)
+			.setName("Api Token")
+			.setDesc(desc)
+			.addText((text) =>
+				text
+					.setPlaceholder("Api Token")
+					.setValue(this.plugin.settings.apiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.apiKey = value;
+						this.plugin.user = await getUser(
+							this.plugin.settings.apiKey,
+						);
+						if (this.plugin.user) {
+							await this.plugin.saveSettings();
+							new Notice(
+								`Welcome ${this.plugin.user.name ||
+								this.plugin.user.email
+								}`,
+							);
+						} else {
+							this.containerEl.appendText("Unable to authorize");
+						}
+					}),
+			);
+	}
+}
