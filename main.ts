@@ -39,19 +39,18 @@ export default class EverhourPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		this.addSettingTab(new SampleSettingTab(this.app, this));
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon(
-			"clock",
-			"Sample Plugin",
-			(evt: MouseEvent) => {
-				// Called when the user clicks the icon.
-			},
-		);
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass("my-plugin-ribbon-class");
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
+		const statusbar = document.getElementsByClassName("everhour-status");
+		const statusBarItemEl =
+			statusbar.length > 0 ? statusbar.item(0) : this.addStatusBarItem();
+		statusBarItemEl?.addClass("everhour-status");
+		if (!statusBarItemEl || !(statusBarItemEl instanceof HTMLElement))
+			throw new Error("Unable to create statusbar");
+		if (!this.settings.apiKey) {
+			new Notice("Missing apikey in everhour plugin");
+			return;
+		}
 
 		this.user = await getUser(this.settings.apiKey);
 		this.activeTimer = await getRunningTimer(
@@ -71,7 +70,6 @@ export default class EverhourPlugin extends Plugin {
 		);
 
 		const projects = await getProjects("Neuron", this.settings.apiKey, {});
-		console.log(projects);
 
 		// This adds an editor command that can perform some operation on the current editor instance
 		this.addCommand({
@@ -107,7 +105,6 @@ export default class EverhourPlugin extends Plugin {
 			},
 		});
 		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
 
 		this.registerInterval(
 			// Check status of tracking once every minute to make it sync with server
@@ -333,21 +330,27 @@ class SampleSettingTab extends PluginSettingTab {
 			.addText((text) =>
 				text
 					.setPlaceholder("Api Token")
-					.setValue(this.plugin.settings.apiKey)
+					.setValue(this.plugin.settings.apiKey || "")
 					.onChange(async (value) => {
 						this.plugin.settings.apiKey = value;
 						this.plugin.user = await getUser(
 							this.plugin.settings.apiKey,
 						);
-						if (this.plugin.user) {
+						if (this.plugin.user?.id) {
 							await this.plugin.saveSettings();
 							new Notice(
 								`Welcome ${this.plugin.user.name ||
 								this.plugin.user.email
 								}`,
 							);
+							this.plugin.onload();
 						} else {
-							this.containerEl.appendText("Unable to authorize");
+							const error = this.containerEl.children[1]
+								? this.containerEl.children[1]
+								: this.containerEl.createDiv();
+							error.setText("Unable to authorize");
+
+							// this.containerEl.setText("Unable to authorize");
 						}
 					}),
 			);

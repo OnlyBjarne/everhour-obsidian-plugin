@@ -2,7 +2,7 @@
 	"manifest_version": 2,
 	"id": "everhour-tracking",
 	"name": "Everhour",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"minAppVersion": "0.15.0",
 	"description": "This is a plugin made for tracking time using everhour",
 	"author": "OnlyBjarne",
