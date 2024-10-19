@@ -6,15 +6,21 @@ import {
 	Setting,
 	SuggestModal,
 } from "obsidian";
-import { Project, Task, Timer, User } from "types";
+import { requestApi } from "requestApi";
+import { Project as EverhourProject, Project, Task, Timer, User } from "types";
 // Remember to rename these classes and interfaces!
 
-interface EverhourPluginSettings {
+interface EverhourPluginData {
 	apiKey: string;
 	reminder: REMINDER_DAYS[];
+
+	// Cache this data for faster loading
+	user?: User;
+	tasks?: Task[];
+	projects?: Project
 }
 
-const DEFAULT_SETTINGS: EverhourPluginSettings = {
+const DEFAULT_SETTINGS: EverhourPluginData = {
 	reminder: [],
 	apiKey: "",
 };
@@ -30,7 +36,7 @@ enum REMINDER_DAYS {
 }
 
 export default class EverhourPlugin extends Plugin {
-	settings: EverhourPluginSettings;
+	settings: EverhourPluginData;
 	user: User;
 
 	activeTimer?: Timer | undefined;
@@ -38,7 +44,9 @@ export default class EverhourPlugin extends Plugin {
 	durationInterval?: number;
 
 	async onload() {
+		console.time("startup")
 		await this.loadSettings();
+
 		this.addSettingTab(new SampleSettingTab(this.app, this));
 
 		const statusbar = document.getElementsByClassName("everhour-status");
@@ -52,30 +60,14 @@ export default class EverhourPlugin extends Plugin {
 			return;
 		}
 
-		this.user = await getUser(this.settings.apiKey);
-		this.activeTimer = await getRunningTimer(
-			this.user.id,
-			this.user.name,
-			this.settings.apiKey,
-		);
 
-		if (this.activeTimer.status == "active") {
-			this.startDurationTracking(statusBarItemEl);
-		} else {
-			statusBarItemEl.setText(`Not tracking time currently`);
-		}
-		const userTasks: Task[] = await getUserTasks(
-			this.user.id,
-			this.settings.apiKey,
-		);
-
-		const projects = await getProjects("Neuron", this.settings.apiKey, {});
+		const projects = getProjects("Neuron", this.settings.apiKey, {});
 
 		// This adds an editor command that can perform some operation on the current editor instance
 		this.addCommand({
 			id: "everhour-start-tracking",
 			name: "Start Time Tracking",
-			callback: () => {
+			callback: async () => {
 				new StartTimerModal(
 					this.app,
 					this.settings.apiKey,
@@ -89,8 +81,11 @@ export default class EverhourPlugin extends Plugin {
 							this.startDurationTracking(statusBarItemEl);
 						}
 					},
-					userTasks,
-					new Map(projects.map((project) => [project.id, project])),
+					await getUserTasks(
+						(await getUser(this.settings.apiKey, this.settings)).id,
+						this.settings.apiKey,
+					),
+					new Map((await projects).map((project) => [project.id, project])),
 				).open();
 			},
 		});
@@ -106,13 +101,20 @@ export default class EverhourPlugin extends Plugin {
 		});
 		// This adds a settings tab so the user can configure various aspects of the plugin
 
+		getRunningTimer(this.settings.apiKey).then((res) => {
+			this.activeTimer = res;
+			if (this.activeTimer?.status == "active") {
+				this.startDurationTracking(statusBarItemEl);
+			} else {
+				statusBarItemEl.setText("No active timer")
+
+			}
+		})
+
 		this.registerInterval(
 			// Check status of tracking once every minute to make it sync with server
 			window.setInterval(async () => {
-				const { id, name } = this.user;
 				this.activeTimer = await getRunningTimer(
-					id,
-					name,
 					this.settings.apiKey,
 				);
 				if (this.activeTimer?.status == "active") {
@@ -124,7 +126,10 @@ export default class EverhourPlugin extends Plugin {
 				}
 			}, 60 * 1000),
 		);
+		console.timeEnd("startup")
 	}
+
+
 
 	onunload() {
 		if (this.durationInterval) {
@@ -169,9 +174,13 @@ function duration(time: number) {
 	return date.toISOString().substring(11, 19);
 }
 
-async function getUser(apikey: string): Promise<User> {
-	const res = await requestApi("/users/me", apikey);
-	return res;
+async function getUser(apikey: string, pluginData: EverhourPluginData): Promise<User> {
+	if (pluginData.user) {
+		return pluginData.user;
+	}
+	const user = await requestApi("/users/me", apikey);
+	pluginData.user = user;
+	return user;
 }
 
 async function getUserTasks(userId: number, apikey: string) {
@@ -191,13 +200,10 @@ async function getTasks(query: string, apikey: string): Promise<Task[]> {
 }
 
 async function getRunningTimer(
-	id: number,
-	name: string,
 	apikey: string,
 ): Promise<Timer> {
 	const res: Timer = await requestApi("/timers/current", apikey, {
 		status: "active",
-		user: { id, name },
 	});
 	return res;
 }
@@ -228,36 +234,8 @@ async function getProjects(
 	query = "",
 	apiKey: string,
 	{ limit = 0 },
-): Promise<Project[]> {
+): Promise<EverhourProject[]> {
 	return requestApi("/projects", apiKey, { query, limit });
-}
-
-// async function getProject(projectId: string, apiKey: string): Promise<Project> {
-// 	return requestApi(`/projects/${projectId}`, apiKey, {});
-// }
-
-async function requestApi<T extends `/${string}`>(
-	url: T,
-	apikey: string,
-	params: object = {},
-	method: "GET" | "DELETE" | "POST" = "GET",
-) {
-	const headers = new Headers({
-		"X-Api-Key": apikey,
-		"Content-Type": "application/json",
-	});
-	const uri = new URL(url, "https://api.everhour.com");
-	if (method == "GET") {
-		for (const [key, value] of Object.entries(params)) {
-			uri.searchParams.append(key, value);
-		}
-	}
-	const response = await fetch(uri.toString(), {
-		headers,
-		method,
-		body: method !== "GET" ? JSON.stringify(params) : undefined,
-	});
-	return await response.json();
 }
 
 class StartTimerModal extends SuggestModal<Task> {
@@ -270,14 +248,14 @@ class StartTimerModal extends SuggestModal<Task> {
 
 	onSelect: (selection: Task) => Task;
 
-	projects: Map<string, Project> = new Map();
+	projects: Map<string, EverhourProject> = new Map();
 
 	constructor(
 		app: App,
 		apikey: string,
 		onSelect: (selection: Task) => any,
 		userTasks: Task[],
-		projects: Map<string, Project>,
+		projects: Map<string, EverhourProject>,
 	) {
 		super(app);
 		this.apiKey = apikey;
@@ -335,6 +313,7 @@ class SampleSettingTab extends PluginSettingTab {
 						this.plugin.settings.apiKey = value;
 						this.plugin.user = await getUser(
 							this.plugin.settings.apiKey,
+							this.plugin.settings
 						);
 						if (this.plugin.user?.id) {
 							await this.plugin.saveSettings();
